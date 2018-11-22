@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+import sys
+import os
+import datetime
+import gzip
+import json
+from collections import namedtuple
+
+from dateutil.parser import isoparse
+
+from cli_parser import parser
+
+FailedValidation = namedtuple('FailedValidation', ['field', 'error'])
+RawQuery = namedtuple('RawQuery', ['fields', 'path_type', 'path', 'timestamp', 'failed_validations'])
+Query = namedtuple('Query', ['fields', 'path_type', 'path', 'timestamp'])
+
+def parse_args():
+    args = parser.parse_args()
+    query = build_query(args)
+    return query
+
+def validate(raw_query):
+    return validate_filepath(validate_timestamp(raw_query))
+
+def validate_timestamp(raw_query):
+    field = 'timestamp'
+    timestamp = None
+    failed_validation = None
+
+    try:
+        timestamp = isoparse(raw_query.timestamp)
+    except Exception as _e:
+        error =  "should be in iso8861 format"
+        failed_validation = FailedValidation(field=field, error=error)
+
+    if timestamp:
+        raw_query = raw_query._replace(timestamp = timestamp)
+
+    if failed_validation:
+        raw_query.failed_validations.append(failed_validation)
+
+    return raw_query
+
+
+def validate_filepath(raw_query):
+    field = 'path'
+    failed_validation = None
+
+    if raw_query.path[:5] == 's3://':
+        path_type = 's3'
+    else:
+        path_type = 'filepath'
+
+    raw_query = raw_query._replace(path_type = path_type)
+
+    if path_type == 'filepath':
+        # be sure to gurantee that the month and day have leading 0s
+        if not os.path.isfile(json_lines_file_path(raw_query)):
+            error  = "json lines file was expected, but not found at {}".format(file_path)
+            failed_validation = FailedValidation(field=field, error=error)
+
+    if failed_validation:
+        raw_query.failed_validations.append(failed_validation)
+
+    return raw_query
+
+def json_lines_file_path(query):
+    date_path = datetime.datetime.strftime(query.timestamp, "%Y/%m/%d.jsonl.gz")
+    return os.path.join(query.path, date_path)
+
+def build_query(args):
+    raw_query = RawQuery(fields=args.field, path_type=None, path=args.path, timestamp=args.timestamp, failed_validations=[])
+
+    validated_raw_query = validate(raw_query)
+
+    if validated_raw_query.failed_validations:
+        for failed_validation in validated_raw_query.failed_validations:
+            msg = "[ERROR]: Field: {} failed validation: {}".format(failed_validation.field, failed_validation.error)
+            print(msg, file=sys.stderr)
+        exit(1)
+
+    return Query(fields=validated_raw_query.fields,
+                 path_type=validated_raw_query.path_type,
+                 path=validated_raw_query.path,
+                 timestamp=validated_raw_query.timestamp)
+
+def read_gzip_json_lines(path):
+    with gzip.GzipFile(path, 'r') as f:
+        lines = f.readlines()
+
+    return [json.loads(line) for line in lines]
+
+def main():
+    query = parse_args()
+    json_lines = read_gzip_json_lines(json_lines_file_path(query))
+
+    # TODO: Build out query mechanism
+    lines_ge_change_time = []
+    lines_ltchange_time = []
+    for line in json_lines:
+        if isoparse(line['changeTime']) >= query.timestamp:
+            lines_ge_change_time.append(line)
+        else:
+            lines_ltchange_time.append(line)
+
+
+
+if __name__ == '__main__':
+    main()
